@@ -1,0 +1,265 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Iconizer</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f25; --line: #2b3038;
+    --text: #e6e8ec; --dim: #8b93a1; --accent: #6ea8fe; --ink: #0d0f12;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: grid; grid-template-columns: 300px 1fr; height: 100vh;
+  }
+  @media (max-width: 760px) { body { grid-template-columns: 1fr; height: auto; } }
+
+  aside {
+    background: var(--panel); border-right: 1px solid var(--line);
+    padding: 20px; overflow-y: auto;
+  }
+  h1 { font-size: 16px; margin: 0 0 2px; letter-spacing: .02em; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 20px; }
+
+  .field { margin-bottom: 18px; }
+  label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 6px; }
+  .val { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=number] {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px;
+  }
+  .seg { display: flex; gap: 4px; }
+  .seg button {
+    flex: 1; padding: 7px 4px; font-size: 12px; cursor: pointer;
+    background: var(--bg); color: var(--dim);
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  .seg button[aria-pressed=true] {
+    background: var(--accent); color: var(--ink); border-color: var(--accent);
+    font-weight: 600;
+  }
+  .actions { display: flex; gap: 8px; margin-top: 22px; }
+  .actions button {
+    flex: 1; padding: 9px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  }
+  .actions button:disabled { opacity: .4; cursor: default; }
+  #download { background: var(--accent); color: var(--ink); border-color: var(--accent); font-weight: 600; }
+
+  main { display: flex; flex-direction: column; min-width: 0; }
+  #drop {
+    flex: 1; margin: 20px; border: 1px dashed var(--line); border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    position: relative; min-height: 320px;
+  }
+  #drop.over { border-color: var(--accent); background: #6ea8fe0f; }
+  #hint { color: var(--dim); text-align: center; padding: 24px; }
+  #hint b { color: var(--text); font-weight: 600; }
+
+  #stage { display: none; width: 100%; height: 100%; align-items: center;
+           justify-content: center; gap: 28px; flex-wrap: wrap; padding: 24px; }
+  figure { margin: 0; text-align: center; }
+  figcaption { color: var(--dim); font-size: 11px; margin-top: 10px;
+               text-transform: uppercase; letter-spacing: .08em; }
+  .frame {
+    width: 300px; height: 300px; border-radius: 12px; background: #fff;
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  /* White only behind the icon, where it is the real backdrop. A source photo
+     of a different aspect ratio would otherwise letterbox against glaring white. */
+  #sourceFrame { background: #0f1114; }
+  .frame img, .frame svg { max-width: 100%; max-height: 100%; display: block; }
+  #icon { color: #111; }
+  #icon svg { width: 100%; height: 100%; }
+  #status { padding: 0 20px 16px; color: var(--dim); font-size: 12px; min-height: 20px; }
+  #status.err { color: #ff8f8f; }
+  .busy { opacity: .45; transition: opacity .12s; }
+</style>
+
+<aside>
+  <h1>Iconizer</h1>
+  <div class="sub">Image to vector icon</div>
+
+  <div class="field">
+    <label>Detail <span class="val" id="detailVal">3</span></label>
+    <input type="range" id="detail" min="1" max="5" step="1" value="3">
+  </div>
+
+  <div class="field">
+    <label>Mode</label>
+    <div class="seg" id="mode">
+      <button data-v="silhouette" aria-pressed="true">Silhouette</button>
+      <button data-v="outline" aria-pressed="false">Outline</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Ink</label>
+    <div class="seg" id="ink">
+      <button data-v="currentColor" aria-pressed="true">Auto</button>
+      <button data-v="black" aria-pressed="false">Black</button>
+      <button data-v="white" aria-pressed="false">White</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Figure / ground</label>
+    <div class="seg" id="invert">
+      <button data-v="auto" aria-pressed="true">Auto</button>
+      <button data-v="on" aria-pressed="false">Invert</button>
+      <button data-v="off" aria-pressed="false">Keep</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Crop</label>
+    <div class="seg" id="crop">
+      <button data-v="1" aria-pressed="true">Subject</button>
+      <button data-v="0" aria-pressed="false">Centre</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>SVG size</label>
+    <input type="number" id="size" value="512" min="16" max="4096" step="16">
+  </div>
+
+  <div class="actions">
+    <button id="pick">Open image</button>
+    <button id="download" disabled>Save SVG</button>
+  </div>
+  <input type="file" id="file" accept="image/*" hidden>
+</aside>
+
+<main>
+  <div id="drop">
+    <div id="hint">Drop an image here<br>or <b>Open image</b></div>
+    <div id="stage">
+      <figure><div class="frame" id="sourceFrame"><img id="source" alt="source"></div>
+        <figcaption>Source</figcaption></figure>
+      <figure><div class="frame" id="icon"></div>
+        <figcaption id="iconCap">Icon</figcaption></figure>
+    </div>
+  </div>
+  <div id="status"></div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const state = { id: null, name: "icon", detail: 3, mode: "silhouette",
+                color: "currentColor", invert: "auto", smart_crop: "1",
+                size: 512, svg: null };
+
+function segment(sel, key, after) {
+  $(sel).addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    [...e.currentTarget.children].forEach(c =>
+      c.setAttribute("aria-pressed", String(c === b)));
+    state[key] = b.dataset.v;
+    (after || render)();
+  });
+}
+segment("#mode", "mode");
+segment("#ink", "color", () => { applyBackdrop(); render(); });
+segment("#invert", "invert");
+segment("#crop", "smart_crop");
+
+$("#detail").addEventListener("input", e => {
+  state.detail = +e.target.value; $("#detailVal").textContent = state.detail; render();
+});
+$("#size").addEventListener("change", e => {
+  state.size = Math.max(16, Math.min(4096, +e.target.value || 512));
+  e.target.value = state.size; render();
+});
+
+$("#pick").addEventListener("click", () => $("#file").click());
+$("#file").addEventListener("change", e => e.target.files[0] && load(e.target.files[0]));
+
+const drop = $("#drop");
+["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.add("over");
+}));
+["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => {
+  e.preventDefault(); drop.classList.remove("over");
+}));
+drop.addEventListener("drop", e => {
+  const f = e.dataTransfer.files[0]; if (f) load(f);
+});
+
+// The icon frame is white by default; white ink on it would be invisible, so
+// the frame follows the ink colour. "Auto" (currentColor) resolves to black.
+function applyBackdrop() {
+  const light = state.color === "white";
+  const frame = $("#icon");
+  frame.style.background = light ? "#0f1114" : "#fff";
+  frame.style.color = state.color === "currentColor" ? "#111" : state.color;
+}
+
+function say(msg, isError) {
+  $("#status").textContent = msg || "";
+  $("#status").className = isError ? "err" : "";
+}
+
+async function load(file) {
+  if (!file.type.startsWith("image/")) return say("That file is not an image.", true);
+  say("Reading " + file.name + "...");
+  state.name = file.name.replace(/\.[^.]+$/, "") || "icon";
+  $("#source").src = URL.createObjectURL(file);
+
+  const body = new FormData(); body.append("file", file);
+  try {
+    const res = await fetch("/api/upload", { method: "POST", body });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "upload failed");
+    state.id = data.id;
+    $("#hint").style.display = "none";
+    $("#stage").style.display = "flex";
+    say(`${data.name} — ${data.width}x${data.height}`);
+    render();
+  } catch (err) { say(err.message, true); }
+}
+
+let pending = null, inFlight = false;
+async function render() {
+  if (!state.id) return;
+  if (inFlight) { pending = true; return; }        // coalesce slider spam
+  inFlight = true;
+  $("#icon").classList.add("busy");
+
+  const body = new FormData();
+  for (const k of ["id", "detail", "mode", "size", "color", "invert", "smart_crop"])
+    body.append(k, state[k]);
+
+  try {
+    const res = await fetch("/api/render", { method: "POST", body });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.detail || "render failed");
+    }
+    state.svg = await res.text();
+    $("#icon").innerHTML = state.svg;
+    applyBackdrop();
+    $("#download").disabled = false;
+    const paths = res.headers.get("X-Icon-Paths");
+    $("#iconCap").textContent = `Icon — ${paths} paths, ${Math.max(1, Math.round(state.svg.length / 1024))} KB`;
+    say("");
+  } catch (err) {
+    say(err.message, true);
+  } finally {
+    inFlight = false;
+    $("#icon").classList.remove("busy");
+    if (pending) { pending = false; render(); }
+  }
+}
+
+$("#download").addEventListener("click", () => {
+  if (!state.svg) return;
+  const url = URL.createObjectURL(new Blob([state.svg], { type: "image/svg+xml" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = state.name + ".svg"; a.click();
+  URL.revokeObjectURL(url);
+});
+</script>

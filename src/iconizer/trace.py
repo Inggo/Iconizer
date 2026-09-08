@@ -46,18 +46,20 @@ def _normalise(svg: str, config: Config) -> str:
 
     Three changes matter: the XML prolog and generator comment go, so the markup
     can be pasted inline into HTML; a viewBox at the requested size makes the
-    icon scale; and `currentColor` fills let it inherit colour from surrounding
-    CSS the way a hand-authored icon does.
+    icon scale; and every fill becomes `config.color`, which defaults to
+    `currentColor` so the icon inherits colour from surrounding CSS.
     """
     start = svg.index("<svg")
     svg = svg[start:]
-    svg = _FILL_RE.sub('fill="currentColor"', svg)
+    # config.color is pattern-validated in Config.__post_init__, so it is safe
+    # to interpolate into an attribute here.
+    svg = _FILL_RE.sub(f'fill="{config.color}"', svg)
 
     size = config.size
     header = (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'width="{size}" height="{size}" '
-        f'viewBox="0 0 {TRACE_RESOLUTION} {TRACE_RESOLUTION}" fill="currentColor">'
+        f'viewBox="0 0 {TRACE_RESOLUTION} {TRACE_RESOLUTION}" fill="{config.color}">'
     )
     svg = _DIMENSION_RE.sub(header, svg, count=1)
     return svg.strip() + "\n"

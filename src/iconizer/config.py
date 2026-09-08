@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
 Mode = Literal["silhouette", "outline"]
+
+# Colours are interpolated straight into SVG markup, so the accepted shapes are
+# restricted rather than escaped: a keyword, or a hex triplet. Anything able to
+# carry a quote or an angle bracket out of a form field is rejected outright.
+COLOR_PATTERN = re.compile(r"^(currentColor|#[0-9a-fA-F]{3,8}|[a-zA-Z]{3,20})$")
 
 # Detail level -> working resolution, in pixels.
 #
@@ -32,11 +38,20 @@ class Config:
     stroke_width: float = 0.02
     """Outline mode only, as a fraction of the working resolution."""
 
+    color: str = "currentColor"
+    """Ink colour. The default inherits from surrounding CSS; a literal colour
+    (``white``, ``#fff``) is what you want for an icon viewed standalone, since
+    ``currentColor`` resolves to black with no CSS around it."""
+
     invert: bool | None = None
     """Force figure/ground polarity. None = decide automatically."""
 
     smart_crop: bool = True
     """Centre the square crop on the busiest region instead of the frame."""
+
+    def __post_init__(self) -> None:
+        if not COLOR_PATTERN.match(self.color):
+            raise ValueError(f"unsupported colour: {self.color!r}")
 
     def working_resolution(self) -> int:
         if self.detail not in DETAIL_RESOLUTIONS:

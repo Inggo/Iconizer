@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from iconizer.config import Config, TRACE_RESOLUTION
 from iconizer.crop import square_crop
@@ -42,3 +43,27 @@ def test_detail_level_controls_resolution(square_subject):
         mask = ink_mask(square_subject, Config(detail=detail))
         assert mask.shape == (TRACE_RESOLUTION, TRACE_RESOLUTION)
         assert set(np.unique(mask)) <= {0, 255}
+
+
+@pytest.mark.parametrize(
+    "colour", ["currentColor", "white", "black", "#fff", "#ff0055", "#ff0055aa"]
+)
+def test_valid_colours_are_accepted(colour):
+    assert Config(color=colour).color == colour
+
+
+@pytest.mark.parametrize(
+    "colour",
+    [
+        '"><script>alert(1)</script>',   # would break out of the fill attribute
+        'red" onload="evil()',
+        "url(#x)",
+        "",
+        "#zzz",
+    ],
+)
+def test_dangerous_colours_are_rejected(colour):
+    """config.color is interpolated into SVG markup, so validation is the only
+    thing standing between a form field and injected attributes."""
+    with pytest.raises(ValueError, match="unsupported colour"):
+        Config(color=colour)

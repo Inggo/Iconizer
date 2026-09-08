@@ -23,4 +23,14 @@ def test_output_is_square_and_colour_inheriting():
     assert 'width="64" height="64"' in svg
     assert f'viewBox="0 0 {TRACE_RESOLUTION} {TRACE_RESOLUTION}"' in svg
     assert 'fill="currentColor"' in svg
-    assert "#" not in svg, "hard-coded colours would defeat currentColor"
+    assert "#" not in svg, "vtracer's own colours must not survive by default"
+
+
+def test_explicit_colour_replaces_every_fill():
+    svg = trace(_disc_mask(), Config(color="white"))
+    assert 'fill="white"' in svg
+    assert "currentColor" not in svg
+
+
+def test_hex_colour_is_accepted():
+    assert 'fill="#ff0055"' in trace(_disc_mask(), Config(color="#ff0055"))

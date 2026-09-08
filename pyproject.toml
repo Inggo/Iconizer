@@ -5,15 +5,19 @@ description = "Turn any image into square vector line art usable as an icon."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "fastapi>=0.141.1",
     "numpy>=2.0",
     "opencv-python-headless>=4.10",
     "pillow>=10.0",
+    "python-multipart>=0.0.32",
     "typer>=0.12",
+    "uvicorn>=0.52.4",
     "vtracer>=0.6.11",
 ]
 
 [project.scripts]
 iconizer = "iconizer.cli:app"
+iconizer-ui = "iconizer.server:main"
 
 [project.optional-dependencies]
 # Rasterising SVG needs libcairo, a *system* library. Keep it out of the core
@@ -21,7 +25,11 @@ iconizer = "iconizer.cli:app"
 preview = ["cairosvg>=2.7"]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "cairosvg>=2.7"]
+dev = [
+    "pytest>=8.0",
+    "cairosvg>=2.7",
+    "httpx>=0.28.1",
+]
 
 [build-system]
 requires = ["hatchling"]
