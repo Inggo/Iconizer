@@ -139,3 +139,143 @@ def test_render_rejects_injected_colour(client, png_bytes):
         "/api/render", data={"id": token, "color": '"><script>alert(1)</script>'}
     )
     assert response.status_code == 400
+
+
+def test_upload_suggests_a_crop(client, png_bytes):
+    body = _upload(client, png_bytes).json()
+    assert body["crop"]["size"] == 600  # the short side of the 900x600 fixture
+    assert 0 <= body["crop"]["x"] <= 300
+
+
+def test_autocrop_follows_the_smart_flag(client, png_bytes):
+    token = _upload(client, png_bytes).json()["id"]
+
+    smart = client.post("/api/autocrop", data={"id": token, "smart_crop": True}).json()
+    centred = client.post("/api/autocrop", data={"id": token, "smart_crop": False}).json()
+    assert centred == {"x": 150, "y": 0, "size": 600}
+    assert smart["x"] > centred["x"]
+
+
+def test_autocrop_unknown_id_is_404(client):
+    assert client.post("/api/autocrop", data={"id": "nope"}).status_code == 404
+
+
+def test_render_honours_an_explicit_crop(client, png_bytes):
+    token = _upload(client, png_bytes).json()["id"]
+    base = {"id": token, "detail": 3}
+
+    background = client.post(
+        "/api/render", data={**base, "crop_x": 0, "crop_y": 0, "crop_size": 150}
+    )
+    edge = client.post(
+        "/api/render", data={**base, "crop_x": 400, "crop_y": 200, "crop_size": 200}
+    )
+    assert background.status_code == edge.status_code == 200
+    assert background.text != edge.text
+
+
+def test_render_rejects_a_zero_crop(client, png_bytes):
+    token = _upload(client, png_bytes).json()["id"]
+    response = client.post("/api/render", data={"id": token, "crop_size": 0})
+    assert response.status_code == 400
+
+
+def test_out_of_bounds_crop_is_clamped_not_rejected(client, png_bytes):
+    """The UI can only ever send a box it drew, but a stale one after a new
+    upload should still render rather than 500."""
+    token = _upload(client, png_bytes).json()["id"]
+    response = client.post(
+        "/api/render",
+        data={"id": token, "crop_x": 5000, "crop_y": 5000, "crop_size": 4000},
+    )
+    assert response.status_code == 200
+
+
+def test_render_accepts_fractional_crop(client, png_bytes):
+    """Pointer drags and wheel zoom produce fractional pixels; the API rounds
+    them rather than answering 422."""
+    token = _upload(client, png_bytes).json()["id"]
+    response = client.post(
+        "/api/render",
+        data={"id": token, "crop_x": 400.4, "crop_y": 200.6, "crop_size": 199.5},
+    )
+    assert response.status_code == 200
+
+
+def test_fractional_crop_rounding_to_zero_is_rejected(client, png_bytes):
+    token = _upload(client, png_bytes).json()["id"]
+    response = client.post("/api/render", data={"id": token, "crop_size": 0.4})
+    assert response.status_code == 400
+
+
+def test_crop_does_not_change_the_output_size(client, png_bytes):
+    """`size` is the SVG's dimension and `crop_size` is a region of the source;
+    they are unrelated, and a crop must not resize the icon."""
+    token = _upload(client, png_bytes).json()["id"]
+    response = client.post(
+        "/api/render",
+        data={"id": token, "size": 64, "crop_x": 400, "crop_y": 200, "crop_size": 200},
+    )
+    assert response.status_code == 200
+    assert 'width="64" height="64"' in response.text
+
+
+def test_upload_accepts_an_executable(client):
+    from pe_fixture import build_pe, disc_icon, icon_resources
+
+    exe = build_pe(icon_resources([(disc_icon(64), "png")]))
+    upload = client.post(
+        "/api/upload", files={"file": ("App.exe", exe, "application/x-msdownload")}
+    )
+    assert upload.status_code == 200, upload.text
+    body = upload.json()
+    assert (body["width"], body["height"], body["extracted"]) == (64, 64, True)
+
+    preview = client.get(f"/api/source/{body['id']}")
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] == "image/png"
+    decoded = cv2.imdecode(np.frombuffer(preview.content, np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape == (64, 64, 3)
+
+    render = client.post("/api/render", data={"id": body["id"]})
+    assert render.status_code == 200
+    assert int(render.headers["X-Icon-Paths"]) >= 1
+
+
+def test_executable_without_an_icon_explains_itself(client):
+    from pe_fixture import build_pe
+
+    response = client.post("/api/upload", files={"file": ("tool.exe", build_pe(None))})
+    assert response.status_code == 400
+    assert "no icon" in response.json()["detail"]
+
+
+def test_images_keep_the_smaller_upload_limit(client, monkeypatch):
+    import iconizer.server as server
+    from pe_fixture import build_pe, disc_icon, icon_resources
+
+    monkeypatch.setattr(server, "_MAX_UPLOAD_BYTES", 1024)
+    big_png = cv2.imencode(".png", np.random.default_rng(0).integers(
+        0, 255, (200, 200, 3), dtype=np.uint8))[1].tobytes()
+    assert _upload(client, big_png).status_code == 413
+
+    exe = build_pe(icon_resources([(disc_icon(64), "png")]))
+    assert len(exe) > 1024
+    assert client.post("/api/upload", files={"file": ("App.exe", exe)}).status_code == 200
+
+
+def test_source_preview_unknown_id_is_404(client):
+    assert client.get("/api/source/nope").status_code == 404
+
+
+def test_upload_reports_the_padding_colour(client, png_bytes):
+    assert _upload(client, png_bytes).json()["pad"] == "#ebebeb"  # the fixture's 235 grey
+
+
+def test_render_accepts_an_overhanging_crop(client, png_bytes):
+    token = _upload(client, png_bytes).json()["id"]
+    response = client.post(
+        "/api/render", data={"id": token, "crop_x": 0, "crop_y": -150, "crop_size": 900}
+    )
+    assert response.status_code == 200
+    assert int(response.headers["X-Icon-Paths"]) >= 1

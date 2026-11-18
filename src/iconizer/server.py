@@ -15,8 +15,10 @@ import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 
-from .config import COLOR_PATTERN, Config, DETAIL_RESOLUTIONS
-from .pipeline import iconize
+from . import winicon
+from .config import COLOR_PATTERN, Config, CropBox, DETAIL_RESOLUTIONS
+from .crop import auto_box, pad_color
+from .pipeline import decode_image, iconize
 
 _WEB_ROOT = Path(__file__).parent / "web"
 
@@ -29,6 +31,7 @@ DEFAULT_PORT = 8791
 # is a desktop-scale tool, not a service.
 _MAX_CACHED_IMAGES = 8
 _MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+_MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
 
 _images: "OrderedDict[str, np.ndarray]" = OrderedDict()
 _lock = threading.Lock()
@@ -59,37 +62,74 @@ def index() -> FileResponse:
     return FileResponse(_WEB_ROOT / "index.html")
 
 
+async def _read_capped(file: UploadFile) -> bytes:
+    """Read an upload, stopping as soon as it is over its size limit.
+
+    The limit is chosen from the first bytes: an executable is mostly code the
+    icon extractor never touches, and Electron apps or games routinely exceed
+    the image limit by a wide margin.
+    """
+    chunks: list[bytes] = []
+    total, limit = 0, _MAX_UPLOAD_BYTES
+    while chunk := await file.read(1024 * 1024):
+        if not chunks and winicon.is_executable(chunk):
+            limit = _MAX_EXECUTABLE_BYTES
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(
+                status_code=413, detail=f"file is too large ({limit // 2**20} MB limit)"
+            )
+    return b"".join(chunks)
+
+
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...)) -> dict:
-    payload = await file.read()
+    payload = await _read_capped(file)
     if not payload:
         raise HTTPException(status_code=400, detail="empty upload")
-    if len(payload) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="image is too large (32 MB limit)")
 
-    decoded = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_UNCHANGED)
-    if decoded is None:
-        raise HTTPException(status_code=400, detail="that file is not a readable image")
-
-    if decoded.ndim == 2:
-        rgb = cv2.cvtColor(decoded, cv2.COLOR_GRAY2RGB)
-    elif decoded.shape[2] == 4:
-        # Same alpha-onto-white flattening as pipeline.load_image.
-        bgr = decoded[:, :, :3].astype(np.float32)
-        alpha = decoded[:, :, 3:4].astype(np.float32) / 255.0
-        rgb = cv2.cvtColor(
-            (bgr * alpha + 255.0 * (1.0 - alpha)).astype(np.uint8), cv2.COLOR_BGR2RGB
-        )
-    else:
-        rgb = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
+    try:
+        rgb = decode_image(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     height, width = rgb.shape[:2]
+    suggested = auto_box(rgb)
+    red, green, blue = pad_color(rgb)
     return {
         "id": _remember(rgb),
         "width": width,
         "height": height,
         "name": file.filename or "image",
+        # Browsers cannot display an .exe (or, reliably, an .ico); the page
+        # shows /api/source instead, which is also exactly what gets traced.
+        "extracted": winicon.is_executable(payload),
+        # Seeds the draggable crop handle with the automatic answer.
+        "crop": {"x": suggested.x, "y": suggested.y, "size": suggested.size},
+        # What an overhanging crop is filled with, so the page can show it.
+        "pad": f"#{red:02x}{green:02x}{blue:02x}",
     }
+
+
+@app.get("/api/source/{token}")
+def source(token: str) -> Response:
+    """The decoded image as PNG, for sources a browser cannot display itself."""
+    ok, encoded = cv2.imencode(".png", cv2.cvtColor(_recall(token), cv2.COLOR_RGB2BGR))
+    if not ok:  # pragma: no cover - PNG encoding of a uint8 array does not fail
+        raise HTTPException(status_code=500, detail="could not encode preview")
+    return Response(content=encoded.tobytes(), media_type="image/png")
+
+
+@app.post("/api/autocrop")
+def autocrop(id: str = Form(...), smart_crop: bool = Form(True)) -> dict:
+    """Where the automatic crop lands, without rendering anything.
+
+    Lets the UI reset a hand-dragged box, or follow the Subject/Centre toggle,
+    using exactly the same code the pipeline would.
+    """
+    box = auto_box(_recall(id), smart=smart_crop)
+    return {"x": box.x, "y": box.y, "size": box.size}
 
 
 @app.post("/api/render")
@@ -101,6 +141,12 @@ def render(
     color: str = Form("currentColor"),
     invert: str = Form("auto"),
     smart_crop: bool = Form(True),
+    # Floats, not ints: crop geometry comes from pointer drags and wheel zoom,
+    # so fractional pixels are normal input. Rejecting them with a 422 pushes a
+    # rounding rule onto every client instead of settling it in one place.
+    crop_x: Optional[float] = Form(None),
+    crop_y: Optional[float] = Form(None),
+    crop_size: Optional[float] = Form(None),
 ) -> Response:
     if detail not in DETAIL_RESOLUTIONS:
         raise HTTPException(status_code=400, detail="detail must be 1-5")
@@ -111,11 +157,22 @@ def render(
     if not COLOR_PATTERN.match(color):
         raise HTTPException(status_code=400, detail="unsupported colour")
 
+    box: Optional[CropBox] = None
+    if crop_size is not None:
+        # Not `size`: that is the SVG's output dimension, and shadowing it here
+        # makes any crop silently resize the icon.
+        side = round(crop_size)
+        if side <= 0:
+            raise HTTPException(status_code=400, detail="crop size must be positive")
+        # Offsets default to 0 so a size-only request still means something.
+        box = CropBox(x=round(crop_x or 0), y=round(crop_y or 0), size=side)
+
     config = Config(
         detail=detail,
         mode=mode,
         size=size,
         color=color,
+        crop=box,
         invert={"auto": None, "on": True, "off": False}[invert],
         smart_crop=smart_crop,
     )

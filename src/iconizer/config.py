@@ -29,6 +29,39 @@ TRACE_RESOLUTION = 1024
 
 
 @dataclass(frozen=True)
+class CropBox:
+    """A square region of the source image, in source pixel coordinates."""
+
+    x: int
+    y: int
+    size: int
+
+    def __post_init__(self) -> None:
+        if self.size <= 0:
+            raise ValueError("crop size must be positive")
+
+    def clamped(self, width: int, height: int) -> "CropBox":
+        """Fit the box to a width x height image, keeping it square.
+
+        The box may be as large as the image's *long* side, so a landscape
+        image can sit whole and centred in a square; along an axis the box
+        overhangs, the overhang is padding (see `crop.apply_box`). The rule per
+        axis: a box that fits stays inside the image, and a box that does not
+        fit must still cover the image along that axis -- it can never slide
+        off into pure padding.
+
+        Size is fitted first: the offset range depends on it.
+        """
+        size = max(1, min(self.size, max(width, height)))
+
+        def place(offset: int, extent: int) -> int:
+            low, high = sorted((0, extent - size))
+            return int(min(max(offset, low), high))
+
+        return CropBox(x=place(self.x, width), y=place(self.y, height), size=size)
+
+
+@dataclass(frozen=True)
 class Config:
     detail: int = 3
     mode: Mode = "silhouette"
@@ -47,7 +80,11 @@ class Config:
     """Force figure/ground polarity. None = decide automatically."""
 
     smart_crop: bool = True
-    """Centre the square crop on the busiest region instead of the frame."""
+    """Centre the square crop on the busiest region instead of the frame.
+    Ignored when `crop` names an explicit region."""
+
+    crop: CropBox | None = None
+    """Explicit crop region. None = choose one automatically."""
 
     def __post_init__(self) -> None:
         if not COLOR_PATTERN.match(self.color):

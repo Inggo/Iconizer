@@ -7,7 +7,7 @@ from typing import Optional
 
 import typer
 
-from .config import Config, DETAIL_RESOLUTIONS
+from .config import Config, CropBox, DETAIL_RESOLUTIONS
 from .pipeline import iconize_file
 
 app = typer.Typer(add_completion=False, help="Turn an image into a vector icon.")
@@ -15,7 +15,10 @@ app = typer.Typer(add_completion=False, help="Turn an image into a vector icon."
 
 @app.command()
 def main(
-    source: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
+    source: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, readable=True,
+        help="An image, or a Windows .exe/.dll whose icon should be used.",
+    ),
     output: Optional[Path] = typer.Option(
         None, "--output", "-o", help="SVG destination (default: <source>.svg)."
     ),
@@ -38,6 +41,11 @@ def main(
     smart_crop: bool = typer.Option(
         True, "--smart-crop/--center-crop", help="Centre the crop on the subject."
     ),
+    crop: Optional[str] = typer.Option(
+        None, "--crop",
+        help="Explicit crop as X,Y,SIZE in source pixels. Overrides auto-crop. "
+        "SIZE may reach the long side; negative offsets then pad the short side.",
+    ),
     preview: Optional[Path] = typer.Option(
         None, "--preview", help="Also write a PNG preview (needs the 'preview' extra)."
     ),
@@ -47,12 +55,17 @@ def main(
 
     try:
         config = Config(
+            crop=_parse_crop(crop),
             detail=detail, mode=mode, size=size, color=color,
             invert=invert, smart_crop=smart_crop,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    icon = iconize_file(source, config)
+    try:
+        icon = iconize_file(source, config)
+    except ValueError as exc:
+        # An executable with no icon is a user-facing answer, not a traceback.
+        raise typer.BadParameter(str(exc), param_hint="SOURCE") from exc
     destination = icon.write(output or source.with_suffix(".svg"))
 
     typer.echo(f"{destination}  ({icon.paths} paths, {len(icon.svg) // 1024} KB)")
@@ -60,6 +73,23 @@ def main(
     if preview is not None:
         _write_preview(destination, preview, size, config.color)
         typer.echo(f"{preview}  (preview)")
+
+
+def _parse_crop(raw: Optional[str]) -> Optional[CropBox]:
+    """Parse `--crop X,Y,SIZE`."""
+    if raw is None:
+        return None
+    parts = raw.replace(" ", "").split(",")
+    if len(parts) != 3:
+        raise typer.BadParameter("--crop takes three values: X,Y,SIZE")
+    try:
+        x, y, size = (int(part) for part in parts)
+    except ValueError as exc:
+        raise typer.BadParameter("--crop values must be whole numbers") from exc
+    try:
+        return CropBox(x=x, y=y, size=size)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _is_light(color: str) -> bool:

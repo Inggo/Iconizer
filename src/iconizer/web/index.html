@@ -41,6 +41,11 @@
     background: var(--accent); color: var(--ink); border-color: var(--accent);
     font-weight: 600;
   }
+  .hintline { font-size: 11px; color: var(--dim); margin-top: 8px; line-height: 1.45; }
+  .linkish {
+    background: none; border: 0; padding: 0; color: var(--accent);
+    font-size: 11px; cursor: pointer; text-decoration: underline;
+  }
   .actions { display: flex; gap: 8px; margin-top: 22px; }
   .actions button {
     flex: 1; padding: 9px; border-radius: 6px; cursor: pointer; font-size: 13px;
@@ -70,7 +75,37 @@
   }
   /* White only behind the icon, where it is the real backdrop. A source photo
      of a different aspect ratio would otherwise letterbox against glaring white. */
-  #sourceFrame { background: #0f1114; }
+  #sourceFrame { background: #0f1114; position: relative; }
+  /* Padded by layoutSource() with room for the crop box to overhang the image.
+     `isolation` makes the wrap a stacking context, so #pad can sit behind the
+     image (z-index -1) without dropping behind the frame's own background. */
+  #sourceWrap { position: relative; line-height: 0; overflow: hidden; isolation: isolate; }
+  #pad { position: absolute; z-index: -1; pointer-events: none; }
+  #pad[hidden] { display: none; }
+  /* Sized explicitly by layoutSource(); a percentage cap against the
+     shrink-to-fit wrap would feed back into its own width. */
+  #sourceFrame #source { max-width: none; max-height: none; }
+  /* The padding matches the image's background by design, so without a
+     hairline there is no telling where the image ends inside the box. */
+  #source { outline: 1px solid rgba(110, 168, 254, .35); }
+  #cropBox {
+    position: absolute; border: 2px solid var(--accent); cursor: move;
+    touch-action: none;
+  }
+  /* Dimming is drawn as four panels around the box. A single element with a
+     huge box-shadow spread is the usual trick, but the shadow is not clipped by
+     the frame and ends up covering the icon preview too. */
+  .dim { position: absolute; background: rgba(0,0,0,.55); pointer-events: none; }
+  .dim[hidden] { display: none; }
+  #cropBox .handle {
+    position: absolute; width: 14px; height: 14px; background: var(--accent);
+    border-radius: 3px;
+  }
+  #cropBox .nw { left: -8px; top: -8px; cursor: nwse-resize; }
+  #cropBox .ne { right: -8px; top: -8px; cursor: nesw-resize; }
+  #cropBox .sw { left: -8px; bottom: -8px; cursor: nesw-resize; }
+  #cropBox .se { right: -8px; bottom: -8px; cursor: nwse-resize; }
+  #cropBox[hidden] { display: none; }
   .frame img, .frame svg { max-width: 100%; max-height: 100%; display: block; }
   #icon { color: #111; }
   #icon svg { width: 100%; height: 100%; }
@@ -120,6 +155,10 @@
       <button data-v="1" aria-pressed="true">Subject</button>
       <button data-v="0" aria-pressed="false">Centre</button>
     </div>
+    <div class="hintline">Drag the box on the source to crop by hand;
+      scroll over it to zoom. It can grow past a wide or tall image to fit it
+      whole. <button id="fitCrop" class="linkish">Fit</button> ·
+      <button id="resetCrop" class="linkish">Reset</button></div>
   </div>
 
   <div class="field">
@@ -131,15 +170,25 @@
     <button id="pick">Open image</button>
     <button id="download" disabled>Save SVG</button>
   </div>
-  <input type="file" id="file" accept="image/*" hidden>
+  <input type="file" id="file" accept="image/*,.ico,.exe,.dll" hidden>
 </aside>
 
 <main>
   <div id="drop">
-    <div id="hint">Drop an image here<br>or <b>Open image</b></div>
+    <div id="hint">Drop an image here<br>or <b>Open image</b>
+      <div class="hintline">Windows .exe and .dll files work too: their icon is used.</div></div>
     <div id="stage">
-      <figure><div class="frame" id="sourceFrame"><img id="source" alt="source"></div>
-        <figcaption>Source</figcaption></figure>
+      <figure><div class="frame" id="sourceFrame"><div id="sourceWrap">
+          <div id="pad" hidden></div>
+          <img id="source" alt="source">
+          <div class="dim" id="dimT" hidden></div><div class="dim" id="dimB" hidden></div>
+          <div class="dim" id="dimL" hidden></div><div class="dim" id="dimR" hidden></div>
+          <div id="cropBox" hidden>
+            <div class="handle nw" data-h="nw"></div><div class="handle ne" data-h="ne"></div>
+            <div class="handle sw" data-h="sw"></div><div class="handle se" data-h="se"></div>
+          </div>
+        </div></div>
+        <figcaption id="sourceCap">Source</figcaption></figure>
       <figure><div class="frame" id="icon"></div>
         <figcaption id="iconCap">Icon</figcaption></figure>
     </div>
@@ -151,7 +200,11 @@
 const $ = s => document.querySelector(s);
 const state = { id: null, name: "icon", detail: 3, mode: "silhouette",
                 color: "currentColor", invert: "auto", smart_crop: "1",
-                size: 512, svg: null };
+                size: 512, svg: null,
+                source: { w: 0, h: 0 },   // natural size of the uploaded image
+                pad: "#ffffff",           // fill for the part of a crop past the image
+                crop: null,               // CropBox in SOURCE pixels, or null for auto
+                manual: false };          // has the user moved the box?
 
 function segment(sel, key, after) {
   $(sel).addEventListener("click", e => {
@@ -165,7 +218,10 @@ function segment(sel, key, after) {
 segment("#mode", "mode");
 segment("#ink", "color", () => { applyBackdrop(); render(); });
 segment("#invert", "invert");
-segment("#crop", "smart_crop");
+segment("#crop", "smart_crop", async () => {
+  if (!state.manual) await autoCrop();   // a hand-placed box outranks the toggle
+  render();
+});
 
 $("#detail").addEventListener("input", e => {
   state.detail = +e.target.value; $("#detailVal").textContent = state.detail; render();
@@ -198,25 +254,256 @@ function applyBackdrop() {
   frame.style.color = state.color === "currentColor" ? "#111" : state.color;
 }
 
+const MIN_CROP = 16;   // source pixels; below this the trace has nothing to work with
+
+/** Scale between displayed image pixels and source pixels. */
+function displayScale() {
+  const img = $("#source");
+  return img.clientWidth ? img.clientWidth / state.source.w : 1;
+}
+
+const DIMS = ["#dimT", "#dimB", "#dimL", "#dimR"];
+
+/**
+ * Size the source preview so the largest allowed crop fits in the frame.
+ *
+ * A box may overhang the image by up to (long side - short side) on either
+ * side of the short axis, so the wrap is padded by that much and the image
+ * shrunk to leave room. Without it the overhang would be clipped by the frame
+ * exactly when the user is trying to see it.
+ */
+function layoutSource() {
+  const { w, h } = state.source;
+  if (!w) return;
+  const reach = Math.max(w, h);
+  const padX = reach - w, padY = reach - h;
+  const k = $("#sourceFrame").clientWidth / Math.max(w + 2 * padX, h + 2 * padY);
+  Object.assign($("#source").style, { width: w * k + "px", height: h * k + "px" });
+  $("#sourceWrap").style.padding = `${padY * k}px ${padX * k}px`;
+}
+
+function place(el, left, top, width, height) {
+  Object.assign(el.style, {
+    left: left + "px", top: top + "px",
+    width: Math.max(0, width) + "px", height: Math.max(0, height) + "px",
+  });
+}
+
+function drawCrop() {
+  const box = $("#cropBox");
+  const img = $("#source");
+  layoutSource();
+  // Called again on the image's load event, so a zero width here is just
+  // "not laid out yet" rather than an error.
+  if (!state.crop || !img.clientWidth) {
+    box.hidden = true;
+    $("#pad").hidden = true;
+    DIMS.forEach(d => ($(d).hidden = true));
+    return;
+  }
+  const k = displayScale();
+  // Image rectangle and box rectangle, both in wrap coordinates.
+  const ix = img.offsetLeft, iy = img.offsetTop;
+  const iw = img.clientWidth, ih = img.clientHeight;
+  const left = ix + state.crop.x * k, top = iy + state.crop.y * k;
+  const side = state.crop.size * k;
+
+  box.hidden = false;
+  place(box, left, top, side, side);
+  // Behind the image, so it only shows where the box overhangs: a preview of
+  // the padding the server will fill in.
+  const pad = $("#pad");
+  pad.hidden = false;
+  pad.style.background = state.pad;
+  place(pad, left, top, side, side);
+
+  // Dim the image outside the box. Box edges are clamped to the image, since
+  // an overhanging box has no image to dim on that side.
+  const clampX = v => Math.min(Math.max(v, ix), ix + iw);
+  const clampY = v => Math.min(Math.max(v, iy), iy + ih);
+  const bx0 = clampX(left), bx1 = clampX(left + side);
+  const by0 = clampY(top), by1 = clampY(top + side);
+  DIMS.forEach(d => ($(d).hidden = false));
+  place($("#dimT"), ix, iy, iw, by0 - iy);
+  place($("#dimB"), ix, by1, iw, iy + ih - by1);
+  place($("#dimL"), ix, by0, bx0 - ix, by1 - by0);
+  place($("#dimR"), bx1, by0, ix + iw - bx1, by1 - by0);
+  $("#sourceCap").textContent =
+    `Source — crop ${state.crop.size}px @ ${state.crop.x},${state.crop.y}` +
+    (state.manual ? "" : " (auto)");
+}
+
+/**
+ * Keep the box square, in source coordinates; mirrors CropBox.clamped.
+ *
+ * The box can grow to the image's long side. Along an axis it fits, it stays
+ * inside the image; along one it overhangs, it must still cover the image, so
+ * it can centre a landscape image but never slide off into pure padding.
+ */
+function clampCrop(c) {
+  // Every field is rounded: drags and wheel zoom generate fractional pixels,
+  // and a fractional crop is both meaningless and rejected by the API.
+  const size = Math.round(
+    Math.max(MIN_CROP, Math.min(c.size, Math.max(state.source.w, state.source.h)))
+  );
+  const fit = (offset, extent) => {
+    const lo = Math.min(0, extent - size), hi = Math.max(0, extent - size);
+    return Math.round(Math.min(Math.max(offset, lo), hi));
+  };
+  return { size, x: fit(c.x, state.source.w), y: fit(c.y, state.source.h) };
+}
+
+function setCrop(c, { manual = true } = {}) {
+  state.crop = clampCrop(c);
+  state.manual = manual;
+  drawCrop();
+}
+
+// Pointer drags: move from the body of the box, resize from a corner handle.
+// The anchor corner stays put while the opposite one follows the pointer.
+let drag = null;
+$("#cropBox").addEventListener("pointerdown", e => {
+  if (!state.crop) return;
+  e.preventDefault();
+  // Capture keeps the drag alive if the pointer leaves the box. Not essential,
+  // and it throws on synthetic pointer ids, so a failure must not abort the drag.
+  try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
+  drag = {
+    handle: e.target.dataset.h || null,
+    startX: e.clientX, startY: e.clientY,
+    origin: { ...state.crop },
+  };
+});
+
+window.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const k = displayScale();
+  const dx = (e.clientX - drag.startX) / k;
+  const dy = (e.clientY - drag.startY) / k;
+  const o = drag.origin;
+
+  if (!drag.handle) {
+    setCrop({ x: o.x + dx, y: o.y + dy, size: o.size });
+  } else {
+    // One scalar drives the square: the mean of both axes, signed so that
+    // dragging away from the anchor grows the box.
+    const signX = drag.handle.includes("w") ? -1 : 1;
+    const signY = drag.handle.includes("n") ? -1 : 1;
+    const delta = (dx * signX + dy * signY) / 2;
+    const size = Math.max(MIN_CROP, o.size + delta);
+    setCrop({
+      size,
+      x: drag.handle.includes("w") ? o.x + (o.size - size) : o.x,
+      y: drag.handle.includes("n") ? o.y + (o.size - size) : o.y,
+    });
+  }
+  scheduleRender();
+});
+
+window.addEventListener("pointerup", () => { if (drag) { drag = null; scheduleRender(); } });
+
+// Wheel zooms about the box centre.
+$("#cropBox").addEventListener("wheel", e => {
+  if (!state.crop) return;
+  e.preventDefault();
+  const factor = e.deltaY > 0 ? 1.08 : 1 / 1.08;
+  const size = state.crop.size * factor;
+  setCrop({
+    size,
+    x: state.crop.x + (state.crop.size - size) / 2,
+    y: state.crop.y + (state.crop.size - size) / 2,
+  });
+  scheduleRender();
+}, { passive: false });
+
+$("#resetCrop").addEventListener("click", async () => { await autoCrop(); render(); });
+
+// The whole image, centred, padded out along its short axis.
+$("#fitCrop").addEventListener("click", () => {
+  if (!state.id) return;
+  const { w, h } = state.source;
+  const size = Math.max(w, h);
+  setCrop({ size, x: (w - size) / 2, y: (h - size) / 2 });
+  render();
+});
+
+/** Ask the server where auto-crop lands, and adopt it. */
+async function autoCrop() {
+  const body = new FormData();
+  body.append("id", state.id);
+  body.append("smart_crop", state.smart_crop);
+  try {
+    const res = await fetch("/api/autocrop", { method: "POST", body });
+    if (res.ok) setCrop(await res.json(), { manual: false });
+  } catch (_) { /* keep whatever box we have */ }
+}
+
+// Tracing is far too slow to run per pointer event, so cropper activity only
+// re-renders once the user has been still for this long. Releasing the pointer
+// is treated as activity too, not as a commit: a release is usually followed by
+// another nudge, and re-tracing on every one of them is the thing being avoided.
+const CROP_IDLE_MS = 1000;
+
+let renderTimer = null;
+function scheduleRender() {
+  clearTimeout(renderTimer);
+  // Dim the preview immediately, so the pause reads as "pending" rather than
+  // as the crop having been ignored.
+  $("#icon").classList.add("busy");
+  renderTimer = setTimeout(() => { renderTimer = null; render(); }, CROP_IDLE_MS);
+}
+
+window.addEventListener("resize", drawCrop);
+// The box is positioned from the displayed image's size, which is only known
+// once the image has actually loaded.
+$("#source").addEventListener("load", drawCrop);
+
+function errorText(payload, fallback) {
+  const detail = payload && payload.detail;
+  if (!detail) return fallback;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map(item => {
+        const field = Array.isArray(item.loc) ? item.loc[item.loc.length - 1] : null;
+        return (field ? field + ": " : "") + (item.msg || JSON.stringify(item));
+      })
+      .join("; ");
+  }
+  return JSON.stringify(detail);
+}
+
 function say(msg, isError) {
   $("#status").textContent = msg || "";
   $("#status").className = isError ? "err" : "";
 }
 
+// Executables carry no image MIME type (and often none at all), so they are
+// recognised by extension; the server makes the final call either way.
+const EXECUTABLE = /\.(exe|dll)$/i;
+
 async function load(file) {
-  if (!file.type.startsWith("image/")) return say("That file is not an image.", true);
-  say("Reading " + file.name + "...");
+  const executable = EXECUTABLE.test(file.name);
+  if (!file.type.startsWith("image/") && !executable && !/\.ico$/i.test(file.name))
+    return say("That file is not an image or a Windows executable.", true);
+  say((executable ? "Extracting the icon from " : "Reading ") + file.name + "...");
   state.name = file.name.replace(/\.[^.]+$/, "") || "icon";
-  $("#source").src = URL.createObjectURL(file);
+  $("#cropBox").hidden = true;
+  // A browser cannot show an .exe; its preview comes from the server below.
+  if (!executable) $("#source").src = URL.createObjectURL(file);
 
   const body = new FormData(); body.append("file", file);
   try {
     const res = await fetch("/api/upload", { method: "POST", body });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "upload failed");
+    if (!res.ok) throw new Error(errorText(data, "upload failed"));
     state.id = data.id;
+    state.source = { w: data.width, h: data.height };
+    state.pad = data.pad;
+    if (data.extracted) $("#source").src = "/api/source/" + encodeURIComponent(data.id);
     $("#hint").style.display = "none";
     $("#stage").style.display = "flex";
+    setCrop(data.crop, { manual: false });   // drawn again on the image's load event
     say(`${data.name} — ${data.width}x${data.height}`);
     render();
   } catch (err) { say(err.message, true); }
@@ -232,12 +519,16 @@ async function render() {
   const body = new FormData();
   for (const k of ["id", "detail", "mode", "size", "color", "invert", "smart_crop"])
     body.append(k, state[k]);
+  if (state.crop) {
+    body.append("crop_x", state.crop.x);
+    body.append("crop_y", state.crop.y);
+    body.append("crop_size", state.crop.size);
+  }
 
   try {
     const res = await fetch("/api/render", { method: "POST", body });
     if (!res.ok) {
-      const e = await res.json().catch(() => ({}));
-      throw new Error(e.detail || "render failed");
+      throw new Error(errorText(await res.json().catch(() => null), "render failed"));
     }
     state.svg = await res.text();
     $("#icon").innerHTML = state.svg;
@@ -250,7 +541,9 @@ async function render() {
     say(err.message, true);
   } finally {
     inFlight = false;
-    $("#icon").classList.remove("busy");
+    // Keep the preview dimmed while another render is still queued behind this
+    // one, whether debounced or coalesced.
+    if (!renderTimer && !pending) $("#icon").classList.remove("busy");
     if (pending) { pending = false; render(); }
   }
 }
